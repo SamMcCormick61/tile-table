@@ -205,14 +205,19 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
 .toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 80;
   background: var(--ink); color: var(--table); padding: 10px 16px; border-radius: 12px; font-weight: 600; box-shadow: 0 10px 30px var(--shadow); max-width: calc(100vw - 32px); text-align: center; }
 .foot { margin-top: 28px; font-size: 12px; color: var(--muted); text-align: center; }
+.ver { font: 600 11px var(--f-body); color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; letter-spacing: .04em; }
+.update { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; padding: 10px 14px; border-radius: 12px; background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.update .btn { background: var(--accent-ink); color: var(--accent); border-color: var(--accent-ink); }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div class="update" id="updateBar" hidden><span id="updateMsg"></span><button class="btn small" type="button" id="reloadBtn">Reload now</button></div>
   <header class="top">
     <button class="mark" id="homeBtn" type="button" aria-label="Tile Table home">
       <span class="minis" aria-hidden="true"><span class="mini">T<i>1</i></span><span class="mini">I<i>1</i></span><span class="mini">L<i>1</i></span><span class="mini">E<i>1</i></span></span>
       <span class="word">Table</span>
+      <span class="ver" id="verTag"></span>
     </button>
     <div class="who" id="whoBar"></div>
   </header>
@@ -311,7 +316,7 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
     </div>
   </section>
 
-  <p class="foot">Words are checked against the TWL06 tournament list plus a few newer words (QI, ZA, OK, EW, ZEN).</p>
+  <p class="foot">Words are checked against the TWL06 tournament list plus a few newer words (QI, ZA, OK, EW, ZEN). <span id="verFoot"></span></p>
 </div>
 
 <div class="overlay" id="blankDlg" hidden>
@@ -331,11 +336,13 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
 </div>
 <div class="toast" id="toast" hidden></div>
 
-<script src="mqtt.min.js"></script>
+<script src="mqtt.min.js?v=3"></script>
 <script>
 (() => {
 'use strict';
 const $ = s => document.querySelector(s);
+// Bump APP_VERSION and version.txt together on every release.
+const APP_VERSION = '3';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // ---------- Rules data ----------
@@ -675,6 +682,7 @@ function onGuestMessage(m) {
   const wasOnline = NET.guests.has(pid);
   NET.guests.set(pid, Date.now());
   if (m.t === 'hello') {
+    if (String(m.v || '1') !== APP_VERSION) { sendToGuest(pid, { t: 'error', msg: `You're on version ${String(m.v || '1').slice(0, 8)} and the host is on version ${APP_VERSION}. Reload the page to update.` }); if (!wasOnline) NET.guests.delete(pid); return; }
     const name = String(m.name || 'Player').trim().slice(0, 16) || 'Player';
     let changed = false;
     if (d.status === 'lobby') {
@@ -698,6 +706,7 @@ function bumpHost(changed) {
   d.online = [S.me, ...NET.guests.keys()];
   if (changed) { d.version = (d.version || 0) + 1; d.updatedAt = Date.now(); }
   d.beat = Date.now();
+  d.appVersion = APP_VERSION;
   if (d.log && d.log.length > 120) d.log = d.log.slice(-120);
   saveHost();
   try { NET.client?.publish(topic(S.code, 'state'), JSON.stringify(d), { qos: 1, retain: true }); } catch {}
@@ -723,7 +732,7 @@ function startGuest(code, resuming) {
   c.on('connect', () => {
     if (NET.client !== c) return;
     c.subscribe([topic(code, 'state'), topic(code, 'to/' + S.me)], { qos: 1 }, () => {
-      sendToHost({ t: 'hello', name: nick() });
+      sendToHost({ t: 'hello', name: nick(), v: APP_VERSION });
     });
     clearTimeout(NET.joinTimer);
     if (!NET.gotState) NET.joinTimer = setTimeout(() => {
@@ -739,6 +748,7 @@ function startGuest(code, resuming) {
       if (!raw) { if (NET.gotState) { toast('The host closed the table.', 5000); goHome(); } return; }
       let d; try { d = JSON.parse(raw); } catch { return; }
       if (!d || d.code !== code) return;
+      if (d.appVersion !== APP_VERSION) { showUpdate(`The host is on version ${String(d.appVersion || 'old').slice(0, 8)} and you're on version ${APP_VERSION}. Ask whoever has the older version to reload.`); return; }
       const stale = Date.now() - (d.beat || 0) > STALE_MS;
       const inGame = (d.seats || []).some(s => s.id === S.me) || (d.players || []).some(p => p.id === S.me);
       if (!NET.gotState && stale && !inGame) return; // an old table nobody is hosting any more
@@ -1188,6 +1198,19 @@ $('#joinBtn').addEventListener('click', () => joinTable($('#codeIn').value));
 $('#codeIn').addEventListener('keydown', e => { if (e.key === 'Enter') joinTable($('#codeIn').value); });
 $('#nick').addEventListener('change', () => store.set('tt-nick', nick()));
 window.addEventListener('beforeunload', e => { if (S.role === 'host' && g()?.status === 'playing') { e.preventDefault(); e.returnValue = ''; } });
+
+// Version check: compare against the published version.txt so stale cached copies get noticed.
+function showUpdate(msg) { $('#updateMsg').textContent = msg; $('#updateBar').hidden = false; }
+$('#reloadBtn').addEventListener('click', () => { location.reload(); });
+$('#verTag').textContent = 'v' + APP_VERSION;
+$('#verFoot').textContent = 'Version ' + APP_VERSION + '.';
+function checkVersion() {
+  fetch('version.txt?t=' + Date.now(), { cache: 'no-store' }).then(r => r.ok ? r.text() : null).then(t => {
+    const latest = (t || '').trim();
+    if (latest && latest !== APP_VERSION) showUpdate(`Version ${latest} is out (you have ${APP_VERSION}). Reload to update.`);
+  }).catch(() => {});
+}
+checkVersion(); setInterval(checkVersion, 60000);
 
 // Boot
 const nm = store.get('tt-nick'); if (nm) $('#nick').value = nm;
