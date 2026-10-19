@@ -331,7 +331,7 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
 </div>
 <div class="toast" id="toast" hidden></div>
 
-<script src="peerjs.min.js"></script>
+<script src="mqtt.min.js"></script>
 <script>
 (() => {
 'use strict';
@@ -586,35 +586,47 @@ function syncRack(str) {
   if (S.selected && !ids.has(S.selected)) S.selected = null;
 }
 
-// ---------- Networking (PeerJS: the host's browser holds the game; guests connect to it) ----------
-const PEER_OPTS = { debug: 0, config: { iceServers: [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:global.stun.twilio.com:3478' },
-  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-] }, ...(window.TT_PEER_OVERRIDE || {}) };
-const peerId = code => 'tiletable-v1-' + code;
-const NET = { peer: null, conns: new Map(), hostConn: null, retry: null, everConnected: false };
+// ---------- Networking ----------
+// Everyone connects out to a public MQTT relay over secure WebSockets, which works on mobile data and strict Wi-Fi.
+// The host's browser holds the game: guests send it actions, and it publishes the whole state back (retained, so
+// anyone who reconnects gets it at once).
+const BROKER = window.TT_BROKER || 'wss://broker.hivemq.com:8884/mqtt';
+const topic = (code, rest) => 'tiletable/v2/' + code + '/' + rest;
+const NET = { client: null, guests: new Map(), timers: [], gotState: false, joinTimer: null, lastBeat: 0 };
+const STALE_MS = 60000;
 
+function mqttClient() {
+  return mqtt.connect(BROKER, {
+    clientId: 'tt_' + S.me.slice(0, 12) + '_' + Math.random().toString(36).slice(2, 8),
+    clean: true, keepalive: 30, reconnectPeriod: 2000, connectTimeout: 12000,
+  });
+}
 function resetNet() {
-  clearTimeout(NET.retry);
-  for (const c of NET.conns.values()) { try { c.close(); } catch {} }
-  NET.conns.clear();
-  try { NET.hostConn?.close(); } catch {}
-  try { NET.peer?.destroy(); } catch {}
-  NET.peer = null; NET.hostConn = null; NET.everConnected = false;
+  for (const t of NET.timers) clearInterval(t);
+  clearTimeout(NET.joinTimer);
+  NET.timers = []; NET.guests.clear(); NET.gotState = false; NET.lastBeat = 0;
+  try { NET.client?.end(true); } catch {}
+  NET.client = null;
 }
 function resetLocal() {
   S.game = null; S.pend.clear(); S.rack = []; S.selected = null; S.exchangeMode = false; S.exchangeSel.clear();
   S.lastVersion = 0; S.endDismissed = false; S.wasMyTurn = false; S.busy = false;
 }
 function goHome() {
-  if (S.role === 'guest' && NET.hostConn?.open) { try { NET.hostConn.send({ t: 'action', action: { kind: 'leave' } }); } catch {} }
-  resetNet(); resetLocal();
+  if (S.role === 'guest') sendToHost({ t: 'action', action: { kind: 'leave' } });
+  const c = NET.client; NET.client = null;
+  setTimeout(() => { try { c?.end(); } catch {} }, 300);
+  for (const t of NET.timers) clearInterval(t);
+  clearTimeout(NET.joinTimer);
+  NET.timers = []; NET.guests.clear(); NET.gotState = false;
+  resetLocal();
   S.code = null; S.role = null; S.phase = 'lobby';
   store.set('tt-session', null);
   document.title = 'Tile Table';
   render();
+}
+function onOffline() {
+  if (S.phase === 'table') toast('Connection dropped. Reconnecting…', 4000);
 }
 
 // Host
@@ -625,133 +637,133 @@ function startHost(code, state, resuming) {
   S.role = 'host'; S.code = code; S.phase = 'connect';
   S.connectMsg = resuming ? 'Reopening your table…' : 'Setting up your table…';
   render();
-  const peer = new Peer(peerId(code), PEER_OPTS);
-  NET.peer = peer;
-  peer.on('open', () => {
-    NET.everConnected = true;
-    store.set('tt-session', JSON.stringify({ role: 'host', code }));
-    state.online = [S.me];
-    S.phase = 'table';
-    setGame(state);
-    saveHost();
+  const c = mqttClient();
+  NET.client = c;
+  let ready = false;
+  c.on('connect', () => {
+    if (NET.client !== c) return;
+    c.subscribe(topic(code, 'to-host'), { qos: 1 });
+    if (!ready) {
+      ready = true;
+      store.set('tt-session', JSON.stringify({ role: 'host', code }));
+      S.phase = 'table';
+      S.game = state;
+      bumpHost(false);
+    } else bumpHost(false);
   });
-  peer.on('connection', conn => {
-    conn.on('data', msg => onGuestMessage(conn, msg));
-    conn.on('close', () => { if (conn.pid && NET.conns.get(conn.pid) === conn) { NET.conns.delete(conn.pid); bumpHost(false); } });
-    conn.on('error', () => {});
+  c.on('message', (t, buf) => {
+    if (NET.client !== c) return;
+    let m; try { m = JSON.parse(buf.toString()); } catch { return; }
+    onGuestMessage(m);
   });
-  peer.on('disconnected', () => { setTimeout(() => { try { if (NET.peer === peer && !peer.destroyed) peer.reconnect(); } catch {} }, 2000); });
-  peer.on('error', err => {
-    if (NET.peer !== peer) return;
-    if (err.type === 'unavailable-id') {
-      if (!resuming) { const s = { ...state, code: genCode() }; startHost(s.code, s, false); return; }
-      S.connectMsg = 'Your table is still closing from last time. Retrying…';
-      render();
-      NET.retry = setTimeout(() => startHost(code, state, true), 4000);
-      return;
-    }
-    if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error' || err.type === 'socket-closed') {
-      toast('Lost the connection to the matchmaking server. Retrying…');
-      NET.retry = setTimeout(() => { try { if (peer.disconnected && !peer.destroyed) peer.reconnect(); } catch {} }, 3000);
-      return;
-    }
-    if (err.type === 'browser-incompatible') { S.connectMsg = "This browser can't host a game. Try Chrome, Safari or Firefox."; render(); }
-  });
+  c.on('offline', onOffline);
+  c.on('error', () => {});
+  // Heartbeat, so guests can tell the host is still here, and drop guests who went quiet.
+  NET.timers.push(setInterval(() => {
+    if (NET.client !== c || !c.connected) return;
+    const now = Date.now();
+    for (const [pid, seen] of NET.guests) if (now - seen > 30000) NET.guests.delete(pid);
+    bumpHost(false);
+  }, 15000));
 }
-function onGuestMessage(conn, msg) {
-  const d = hostState(); if (!d || !msg || typeof msg !== 'object') return;
-  if (msg.t === 'hello') {
-    const pid = String(msg.pid || '').slice(0, 40);
-    const name = String(msg.name || 'Player').trim().slice(0, 16) || 'Player';
-    if (!pid || pid === S.me) { conn.send({ t: 'error', msg: 'That device is already at this table as the host.' }); return; }
-    const old = NET.conns.get(pid);
-    if (old && old !== conn) { try { old.close(); } catch {} }
-    conn.pid = pid; NET.conns.set(pid, conn);
+function sendToGuest(pid, m) { try { NET.client?.publish(topic(S.code, 'to/' + pid), JSON.stringify(m), { qos: 1 }); } catch {} }
+function onGuestMessage(m) {
+  const d = hostState(); if (!d || !m || typeof m !== 'object') return;
+  const pid = String(m.pid || '').slice(0, 40);
+  if (!pid) return;
+  if (pid === S.me) return;
+  const wasOnline = NET.guests.has(pid);
+  NET.guests.set(pid, Date.now());
+  if (m.t === 'hello') {
+    const name = String(m.name || 'Player').trim().slice(0, 16) || 'Player';
+    let changed = false;
     if (d.status === 'lobby') {
       const seat = d.seats.find(s => s.id === pid);
-      if (seat) seat.name = name;
-      else if (d.seats.length < 4) d.seats.push({ id: pid, name, joinedAt: Date.now() });
+      if (seat) { if (seat.name !== name) { seat.name = name; changed = true; } }
+      else if (d.seats.length < 4) { d.seats.push({ id: pid, name, joinedAt: Date.now() }); changed = true; }
     }
-    bumpHost(true);
+    bumpHost(changed);
     return;
   }
-  if (msg.t === 'action' && conn.pid) {
-    const err = applyAction(d, conn.pid, msg.action, S.dict);
-    if (err) { try { conn.send({ t: 'error', msg: err }); } catch {} return; }
-    if (msg.action?.kind === 'leave') { NET.conns.delete(conn.pid); }
+  if (m.t === 'ping') { if (!wasOnline) bumpHost(false); return; }
+  if (m.t === 'action') {
+    const err = applyAction(d, pid, m.action, S.dict);
+    if (err) { sendToGuest(pid, { t: 'error', msg: err }); return; }
+    if (m.action?.kind === 'leave') NET.guests.delete(pid);
     bumpHost(true);
   }
 }
 function bumpHost(changed) {
   const d = hostState(); if (!d) return;
-  d.online = [S.me, ...NET.conns.keys()];
+  d.online = [S.me, ...NET.guests.keys()];
   if (changed) { d.version = (d.version || 0) + 1; d.updatedAt = Date.now(); }
+  d.beat = Date.now();
   if (d.log && d.log.length > 120) d.log = d.log.slice(-120);
   saveHost();
-  const payload = { t: 'state', state: d };
-  for (const c of NET.conns.values()) { try { if (c.open) c.send(payload); } catch {} }
+  try { NET.client?.publish(topic(S.code, 'state'), JSON.stringify(d), { qos: 1, retain: true }); } catch {}
   setGame(d);
+}
+function hostCloseTable() {
+  try { NET.client?.publish(topic(S.code, 'state'), '', { qos: 1, retain: true }); } catch {}
 }
 
 // Guest
+function sendToHost(m) {
+  const c = NET.client;
+  if (!c || !c.connected || !S.code) return false;
+  try { c.publish(topic(S.code, 'to-host'), JSON.stringify({ ...m, pid: S.me }), { qos: 1 }); return true; } catch { return false; }
+}
 function startGuest(code, resuming) {
   resetNet(); resetLocal();
   S.role = 'guest'; S.code = code; S.phase = 'connect';
   S.connectMsg = `Looking for table ${code}…`;
   render();
-  const peer = new Peer(PEER_OPTS);
-  NET.peer = peer;
-  peer.on('open', () => connectToHost(peer, code, resuming));
-  peer.on('disconnected', () => { setTimeout(() => { try { if (NET.peer === peer && !peer.destroyed) peer.reconnect(); } catch {} }, 2000); });
-  peer.on('error', err => {
-    if (NET.peer !== peer) return;
-    if (err.type === 'peer-unavailable') {
-      if (!NET.everConnected && !resuming) {
-        toast(`No open table with code ${code}. Check the code, and make sure the host still has the page open.`, 6000);
-        goHome(); return;
-      }
-      S.connectMsg = `Waiting for the host of table ${code} to come back…`; render();
-      NET.retry = setTimeout(() => connectToHost(peer, code, true), 4000);
-      return;
-    }
-    if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error' || err.type === 'socket-closed') {
-      S.connectMsg = 'Lost the connection. Retrying…'; render();
-      NET.retry = setTimeout(() => startGuest(code, true), 4000);
+  const c = mqttClient();
+  NET.client = c;
+  c.on('connect', () => {
+    if (NET.client !== c) return;
+    c.subscribe([topic(code, 'state'), topic(code, 'to/' + S.me)], { qos: 1 }, () => {
+      sendToHost({ t: 'hello', name: nick() });
+    });
+    clearTimeout(NET.joinTimer);
+    if (!NET.gotState) NET.joinTimer = setTimeout(() => {
+      if (NET.client !== c || NET.gotState) return;
+      if (resuming) { S.connectMsg = `Waiting for the host of table ${code} to open the page again…`; render(); }
+      else { toast(`No open table with code ${code}. Check the code, and make sure the host still has the page open.`, 6000); goHome(); }
+    }, 9000);
+  });
+  c.on('message', (t, buf) => {
+    if (NET.client !== c) return;
+    const raw = buf.toString();
+    if (t.endsWith('/state')) {
+      if (!raw) { if (NET.gotState) { toast('The host closed the table.', 5000); goHome(); } return; }
+      let d; try { d = JSON.parse(raw); } catch { return; }
+      if (!d || d.code !== code) return;
+      const stale = Date.now() - (d.beat || 0) > STALE_MS;
+      const inGame = (d.seats || []).some(s => s.id === S.me) || (d.players || []).some(p => p.id === S.me);
+      if (!NET.gotState && stale && !inGame) return; // an old table nobody is hosting any more
+      NET.gotState = true; NET.lastBeat = Date.now();
+      clearTimeout(NET.joinTimer);
+      store.set('tt-session', JSON.stringify({ role: 'guest', code }));
+      store.set('tt-nick', nick());
+      S.phase = 'table'; S.busy = false;
+      if (stale) toast('The host seems to be away. The game continues when they open the page again.', 5000);
+      setGame(d);
+    } else {
+      let m; try { m = JSON.parse(raw); } catch { return; }
+      if (m?.t === 'error') { S.busy = false; toast(String(m.msg || 'That did not work.'), 4500); render(); }
     }
   });
+  c.on('offline', onOffline);
+  c.on('error', () => {});
+  NET.timers.push(setInterval(() => {
+    if (NET.client !== c) return;
+    sendToHost({ t: 'ping' });
+    if (NET.gotState && Date.now() - NET.lastBeat > 45000 && !hostAway) { hostAway = true; render(); }
+    else if (Date.now() - NET.lastBeat <= 45000 && hostAway) { hostAway = false; render(); }
+  }, 10000));
 }
-function connectToHost(peer, code, resuming) {
-  if (NET.peer !== peer) return;
-  const conn = peer.connect(peerId(code), { reliable: true });
-  NET.hostConn = conn;
-  const timer = setTimeout(() => {
-    if (!conn.open && NET.hostConn === conn) {
-      try { conn.close(); } catch {}
-      S.connectMsg = "Still trying to reach the host. If this keeps happening, try another network (for example, switch off Wi-Fi on a phone).";
-      render();
-      connectToHost(peer, code, resuming);
-    }
-  }, 12000);
-  conn.on('open', () => {
-    clearTimeout(timer);
-    NET.everConnected = true;
-    store.set('tt-session', JSON.stringify({ role: 'guest', code }));
-    store.set('tt-nick', nick());
-    conn.send({ t: 'hello', pid: S.me, name: nick() });
-  });
-  conn.on('data', msg => {
-    if (!msg || typeof msg !== 'object') return;
-    if (msg.t === 'state' && msg.state) { S.phase = 'table'; S.busy = false; setGame(msg.state); }
-    else if (msg.t === 'error') { S.busy = false; toast(String(msg.msg || 'That did not work.'), 4500); render(); }
-  });
-  conn.on('close', () => {
-    clearTimeout(timer);
-    if (NET.hostConn !== conn || S.role !== 'guest') return;
-    S.phase = 'connect'; S.connectMsg = `Lost the connection to the host. Reconnecting to table ${code}…`; render();
-    NET.retry = setTimeout(() => connectToHost(peer, code, true), 3000);
-  });
-  conn.on('error', () => {});
-}
+let hostAway = false;
 
 // Actions from this device
 function act(action) {
@@ -761,12 +773,12 @@ function act(action) {
     bumpHost(true);
     return true;
   }
-  if (S.role === 'guest' && NET.hostConn?.open) {
+  if (S.role === 'guest' && sendToHost({ t: 'action', action })) {
     S.busy = true; render();
-    NET.hostConn.send({ t: 'action', action });
+    clearTimeout(act.h); act.h = setTimeout(() => { if (S.busy) { S.busy = false; toast("The host didn't answer. Try again.", 4000); render(); } }, 10000);
     return true;
   }
-  toast('Not connected to the host right now.');
+  toast('Not connected right now. Reconnecting…');
   return false;
 }
 
@@ -816,7 +828,7 @@ function joinTable(code) {
   startGuest(code, false);
 }
 function closeTable() {
-  if (S.role === 'host') store.set('tt-host-' + S.code, null);
+  if (S.role === 'host') { store.set('tt-host-' + S.code, null); hostCloseTable(); }
   goHome();
 }
 
@@ -1068,7 +1080,7 @@ function renderTurnLine() {
   const cur = d.players[d.turn];
   if (isMyTurn()) el.innerHTML = `<span class="pill go">Your turn</span>`;
   else if (myIndex() < 0) el.innerHTML = `<span class="pill wait">Watching · ${esc(cur?.name)} to play</span>`;
-  else el.innerHTML = `<span class="pill wait">Waiting for ${esc(cur?.name)}${isOnline(cur?.id) ? '' : ' (offline)'}</span>`;
+  else el.innerHTML = `<span class="pill wait">Waiting for ${esc(cur?.name)}${isOnline(cur?.id) && !(S.role === 'guest' && hostAway) ? '' : ' (offline)'}</span>`;
 }
 document.addEventListener('click', e => { if (e.target.id === 'showEnd') { S.endDismissed = false; render(); } });
 
@@ -1179,7 +1191,7 @@ window.addEventListener('beforeunload', e => { if (S.role === 'host' && g()?.sta
 
 // Boot
 const nm = store.get('tt-nick'); if (nm) $('#nick').value = nm;
-if (typeof Peer === 'undefined') toast('The connection library did not load. Reload the page.', 8000);
+if (typeof mqtt === 'undefined') toast('The connection library did not load. Reload the page.', 8000);
 const hash = (location.hash || '').slice(1).toUpperCase();
 if (/^[A-Z]{4}$/.test(hash)) {
   history.replaceState(null, '', location.pathname);

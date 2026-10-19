@@ -8,10 +8,10 @@ A crossword tile game for 2 to 4 players, each on their own device. Standard 15Ã
 
 - The host taps **Start a new table** and shares the four-letter code (or the invite link).
 - Friends open the page, type their name and the code, and join. No accounts needed.
-- The host's browser runs the game and the players connect to it directly (WebRTC via [PeerJS](https://peerjs.com)), so the host keeps the page open until the game ends. If anyone reloads, they rejoin where they left off.
+- The host's browser runs the game. Every player connects out to a public relay ([HiveMQ's public MQTT broker](https://www.hivemq.com/mqtt/public-mqtt-broker/)) over a secure WebSocket, which works on mobile data and strict Wi-Fi. The host keeps the page open until the game ends; if anyone reloads, they rejoin where they left off.
 
 ## Files
 
 - `index.html` - the whole game (rules, scoring, board, networking)
 - `words.txt` - word list (TWL06 plus QI, ZA, OK, EW, ZEN)
-- `peerjs.min.js` - PeerJS 1.5.4 (MIT license), bundled so the page has no build step
+- `mqtt.min.js` - MQTT.js 5.10.1 (MIT license), bundled so the page has no build step
