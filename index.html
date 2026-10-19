@@ -234,7 +234,6 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
           <label for="nick">Shown to the other players</label>
           <input class="input" id="nick" maxlength="16" placeholder="e.g. Sam" autocomplete="nickname">
         </div>
-        <div id="resumeBox" class="stack" hidden></div>
       </div>
       <div class="card stack">
         <h2>Host a game</h2>
@@ -251,6 +250,10 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
           <button class="btn" id="joinBtn" type="button">Join</button>
         </div>
         <p class="muted" style="margin:0;font-size:13px">Ask the host for the code shown at the top of their screen.</p>
+      </div>
+      <div class="card stack" id="gamesCard" hidden>
+        <h2>Your games</h2>
+        <ul class="list" id="gamesList"></ul>
       </div>
     </div>
   </section>
@@ -336,13 +339,13 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
 </div>
 <div class="toast" id="toast" hidden></div>
 
-<script src="mqtt.min.js?v=3"></script>
+<script src="mqtt.min.js?v=4"></script>
 <script>
 (() => {
 'use strict';
 const $ = s => document.querySelector(s);
 // Bump APP_VERSION and version.txt together on every release.
-const APP_VERSION = '3';
+const APP_VERSION = '4';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // ---------- Rules data ----------
@@ -545,6 +548,16 @@ const S = {
 };
 let uid = 0;
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} } };
+// Games this device has hosted or joined, so paused games can be picked up later.
+function loadGames() { try { const a = JSON.parse(store.get('tt-games') || '[]'); return Array.isArray(a) ? a.filter(x => x && /^[A-Z]{4}$/.test(x.code || '')) : []; } catch { return []; } }
+function saveGames(a) { store.set('tt-games', JSON.stringify(a.slice(0, 12))); }
+function rememberGame(d, role) {
+  if (!d || !/^[A-Z]{4}$/.test(d.code || '')) return;
+  const names = (d.players || d.seats || []).map(p => String(p.name || '')).slice(0, 4);
+  const entry = { code: d.code, role, at: Date.now(), status: d.status, paused: !!d.paused, names, host: d.hostName || '' };
+  saveGames([entry, ...loadGames().filter(x => x.code !== d.code)]);
+}
+function forgetGame(code) { saveGames(loadGames().filter(x => x.code !== code)); store.set('tt-host-' + code, null); }
 S.me = store.get('tt-pid');
 if (!S.me) { S.me = 'p' + Array.from(crypto.getRandomValues(new Uint8Array(9)), b => b.toString(36).padStart(2, '0')).join(''); store.set('tt-pid', S.me); }
 
@@ -555,7 +568,7 @@ function toast(msg, ms = 3200) {
 function nick() { return $('#nick').value.trim().slice(0, 16) || 'Player'; }
 const g = () => S.game;
 const myIndex = () => g()?.players ? g().players.findIndex(p => p.id === S.me) : -1;
-const isPlaying = () => g()?.status === 'playing';
+const isPlaying = () => g()?.status === 'playing' && !g().paused;
 const isMyTurn = () => isPlaying() && myIndex() >= 0 && g().turn === myIndex();
 
 // ---------- Dictionary ----------
@@ -655,7 +668,12 @@ function startHost(code, state, resuming) {
       store.set('tt-session', JSON.stringify({ role: 'host', code }));
       S.phase = 'table';
       S.game = state;
-      bumpHost(false);
+      if (state.paused) {
+        state.paused = false;
+        state.lastMove = { by: S.me, cells: [] };
+        state.log.push({ kind: 'resume', p: Math.max(0, state.players.findIndex(p => p.id === S.me)) });
+        bumpHost(true);
+      } else bumpHost(false);
     } else bumpHost(false);
   });
   c.on('message', (t, buf) => {
@@ -709,8 +727,18 @@ function bumpHost(changed) {
   d.appVersion = APP_VERSION;
   if (d.log && d.log.length > 120) d.log = d.log.slice(-120);
   saveHost();
+  rememberGame(d, 'host');
   try { NET.client?.publish(topic(S.code, 'state'), JSON.stringify(d), { qos: 1, retain: true }); } catch {}
   setGame(d);
+}
+function hostPause() {
+  const d = hostState(); if (!d || d.status !== 'playing' || d.paused) return;
+  d.paused = true;
+  d.lastMove = { by: S.me, cells: [] };
+  d.log.push({ kind: 'pause', p: Math.max(0, d.players.findIndex(p => p.id === S.me)) });
+  bumpHost(true);
+  toast('Game paused and saved. Open it from Your games to carry on.', 5000);
+  setTimeout(goHome, 400);
 }
 function hostCloseTable() {
   try { NET.client?.publish(topic(S.code, 'state'), '', { qos: 1, retain: true }); } catch {}
@@ -755,8 +783,10 @@ function startGuest(code, resuming) {
       NET.gotState = true; NET.lastBeat = Date.now();
       clearTimeout(NET.joinTimer);
       store.set('tt-session', JSON.stringify({ role: 'guest', code }));
+      rememberGame(d, 'guest');
       store.set('tt-nick', nick());
       S.phase = 'table'; S.busy = false;
+      if (d.online && !d.online.includes(S.me) && Date.now() - (NET.lastPing || 0) > 2000) { NET.lastPing = Date.now(); sendToHost({ t: 'ping' }); }
       if (stale) toast('The host seems to be away. The game continues when they open the page again.', 5000);
       setGame(d);
     } else {
@@ -820,6 +850,8 @@ function describe(e, data) {
   if (e.kind === 'pass') return `${who} passed`;
   if (e.kind === 'skip') return `${who}'s turn was skipped by the host`;
   if (e.kind === 'end') return 'Game over';
+  if (e.kind === 'pause') return `${who} paused the game. It carries on when they open it again.`;
+  if (e.kind === 'resume') return `${who} is back. The game carries on.`;
   return '';
 }
 
@@ -838,7 +870,11 @@ function joinTable(code) {
   startGuest(code, false);
 }
 function closeTable() {
-  if (S.role === 'host') { store.set('tt-host-' + S.code, null); hostCloseTable(); }
+  const d = g();
+  if (d && d.status === 'lobby') {
+    if (S.role === 'host') hostCloseTable();
+    forgetGame(S.code);
+  }
   goHome();
 }
 
@@ -1069,6 +1105,8 @@ function renderSide() {
     else if (e.kind === 'swap') what = `${nm} swapped ${Number(e.n) || 0}`;
     else if (e.kind === 'pass') what = `${nm} passed`;
     else if (e.kind === 'skip') what = `${nm} was skipped`;
+    else if (e.kind === 'pause') what = `${nm} paused the game`;
+    else if (e.kind === 'resume') what = `${nm} resumed the game`;
     return `<li><span class="dot" style="background:${SEATS[e.p] || 'var(--muted)'}"></span><span class="what">${what}</span><span class="n">${e.kind === 'play' ? '+' + (Number(e.score) || 0) : ''}</span></li>`;
   }).join('') : '<li><span></span><span class="what muted">No moves yet. The first word must cover the star.</span><span></span></li>';
   let hb = '';
@@ -1088,6 +1126,7 @@ function renderTurnLine() {
   const d = g(); const el = $('#turnLine');
   if (d.status === 'done') { el.innerHTML = `<span class="pill wait">Game over</span><button class="btn small" type="button" id="showEnd">Final scores</button>`; return; }
   const cur = d.players[d.turn];
+  if (d.paused) { el.innerHTML = `<span class="pill wait">Game paused</span><span class="muted" style="font-weight:500">It carries on when ${esc(d.hostName || 'the host')} opens it again.</span>`; return; }
   if (isMyTurn()) el.innerHTML = `<span class="pill go">Your turn</span>`;
   else if (myIndex() < 0) el.innerHTML = `<span class="pill wait">Watching · ${esc(cur?.name)} to play</span>`;
   else el.innerHTML = `<span class="pill wait">Waiting for ${esc(cur?.name)}${isOnline(cur?.id) && !(S.role === 'guest' && hostAway) ? '' : ' (offline)'}</span>`;
@@ -1141,14 +1180,29 @@ $('#copyLink').addEventListener('click', async () => {
   catch { toast(link, 8000); }
 });
 
-function renderResume() {
-  const box = $('#resumeBox');
-  let sess = null; try { sess = JSON.parse(store.get('tt-session') || 'null'); } catch {}
-  if (!sess || !/^[A-Z]{4}$/.test(sess.code || '')) { box.hidden = true; return; }
-  box.hidden = false;
-  box.innerHTML = `<p class="muted" style="margin:0;font-size:13px">You were at table ${esc(sess.code)}${sess.role === 'host' ? ' as the host' : ''}.</p><button class="btn" type="button" id="resumeBtn">Go back to table ${esc(sess.code)}</button>`;
+function renderGames() {
+  const games = loadGames();
+  $('#gamesCard').hidden = !games.length;
+  $('#gamesList').innerHTML = games.map(x => {
+    const others = (x.names || []).join(', ');
+    const st = x.status === 'done' ? 'Finished' : x.paused ? 'Paused' : x.status === 'lobby' ? 'Waiting to start' : 'In progress';
+    return `<li><span class="info"><strong>Table ${esc(x.code)}${x.role === 'host' ? ' · you host' : ''}</strong><span>${esc(st)}${others ? ' · ' + esc(others) : ''}</span></span><span style="display:flex;gap:6px;flex:none"><button class="btn small${x.paused || x.status === 'playing' ? ' primary' : ''}" type="button" data-open="${esc(x.code)}">${x.status === 'done' ? 'View' : 'Open'}</button><button class="btn small" type="button" data-forget="${esc(x.code)}" aria-label="Remove table ${esc(x.code)}">✕</button></span></li>`;
+  }).join('');
 }
-document.addEventListener('click', e => { if (e.target.id === 'resumeBtn') resume(); });
+document.addEventListener('click', e => {
+  const o = e.target.closest('[data-open]'); if (o) { openGame(o.dataset.open); return; }
+  const f = e.target.closest('[data-forget]'); if (f) { if (S.armed === 'forget' + f.dataset.forget) { S.armed = null; forgetGame(f.dataset.forget); render(); } else { arm('forget' + f.dataset.forget, () => {}); toast('Tap ✕ again to remove it from this device.'); } }
+});
+function openGame(code) {
+  const x = loadGames().find(y => y.code === code);
+  store.set('tt-nick', nick());
+  if (x && x.role === 'host') {
+    let st = null; try { st = JSON.parse(store.get('tt-host-' + code) || 'null'); } catch {}
+    if (st) { startHost(code, st, true); return; }
+    toast("That game's save is missing on this device."); forgetGame(code); render(); return;
+  }
+  startGuest(code, true);
+}
 function resume() {
   let sess = null; try { sess = JSON.parse(store.get('tt-session') || 'null'); } catch {}
   if (!sess) return;
@@ -1166,10 +1220,12 @@ function renderWho() {
     const n = (g()?.online || []).length;
     h += `<span class="chip">Table <code>${esc(S.code)}</code></span>`;
     if (S.role === 'host') h += `<span class="chip">${n} connected</span>`;
-    h += `<button class="btn small" type="button" id="toLobby">Leave table</button>`;
+    if (S.role === 'host' && g()?.status === 'playing' && !g().paused) h += `<button class="btn small${S.armed === 'pause' ? ' warn' : ''}" type="button" id="pauseBtn">${S.armed === 'pause' ? 'Tap again to pause' : 'Pause and save'}</button>`;
+    else h += `<button class="btn small" type="button" id="toLobby">Leave table</button>`;
   }
   $('#whoBar').innerHTML = h;
 }
+document.addEventListener('click', e => { if (e.target.id === 'pauseBtn') arm('pause', hostPause); });
 document.addEventListener('click', e => {
   if (e.target.id !== 'toLobby') return;
   if (S.armed !== 'leave') toast('Tap Leave table again to leave.' + (S.role === 'host' ? ' Your friends lose their connection while you are away.' : ''), 3500);
@@ -1187,7 +1243,7 @@ function render() {
   $('#waitView').hidden = view !== 'wait';
   $('#gameView').hidden = view !== 'game';
   if (view !== 'game') $('#endDlg').hidden = true;
-  if (view === 'lobby') { renderResume(); return; }
+  if (view === 'lobby') { renderGames(); return; }
   if (view === 'connect') { $('#connectTitle').textContent = S.role === 'host' ? 'Opening your table' : 'Joining table ' + S.code; $('#connectMsg').textContent = S.connectMsg; return; }
   if (view === 'wait') { renderWait(); return; }
   renderTurnLine(); renderBoard(); renderRack(); renderSide(); renderEnd();
