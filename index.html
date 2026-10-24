@@ -204,6 +204,13 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
 .final li .adj { font-size: 12px; color: var(--muted); }
 .toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 80;
   background: var(--ink); color: var(--table); padding: 10px 16px; border-radius: 12px; font-weight: 600; box-shadow: 0 10px 30px var(--shadow); max-width: calc(100vw - 32px); text-align: center; }
+.clk { font: 600 12px var(--f-tile); letter-spacing: .03em; font-variant-numeric: tabular-nums; color: var(--ink); }
+.clk.ot, .pen { color: var(--bad); }
+.pen { font-weight: 700; }
+.myclock { font: 700 15px var(--f-tile); font-variant-numeric: tabular-nums; letter-spacing: .03em; }
+.myclock.ot { color: var(--bad); }
+.timers { display: flex; flex-wrap: wrap; gap: 6px; }
+.timers .btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .foot { margin-top: 28px; font-size: 12px; color: var(--muted); text-align: center; }
 .ver { font: 600 11px var(--f-body); color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; letter-spacing: .04em; }
 .update { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; padding: 10px 14px; border-radius: 12px; background: var(--accent); color: var(--accent-ink); font-weight: 600; }
@@ -269,6 +276,7 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
       <div class="card stack">
         <h2>Seats</h2>
         <div class="seats" id="seatList"></div>
+        <div class="stack" id="timerBox" style="gap:8px"></div>
         <div class="actions" id="waitActions"></div>
       </div>
     </div>
@@ -339,13 +347,13 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
 </div>
 <div class="toast" id="toast" hidden></div>
 
-<script src="mqtt.min.js?v=4"></script>
+<script src="mqtt.min.js?v=5"></script>
 <script>
 (() => {
 'use strict';
 const $ = s => document.querySelector(s);
 // Bump APP_VERSION and version.txt together on every release.
-const APP_VERSION = '4';
+const APP_VERSION = '5';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // ---------- Rules data ----------
@@ -436,6 +444,54 @@ function drawInto(d, p) {
   const k = Math.min(Math.max(0, 7 - p.rack.length), d.bag.length);
   if (k) { p.rack += d.bag.slice(-k); d.bag = d.bag.slice(0, -k); }
 }
+// ---------- Timers ----------
+// 'move' gives each turn a fixed limit (then an automatic pass). 'bank' is a chess clock: main time for the
+// whole game plus overtime; overtime costs 10 points per minute or part, and running out of it puts you out.
+const MIN = 60000 / (window.TT_TIME_SCALE || 1);
+const TIMERS = {
+  off: { label: 'No timer' },
+  move: { label: '2 min per move', mode: 'move', move: 2 * MIN },
+  quick: { label: 'Quick 15 + 5', mode: 'bank', main: 15 * MIN, over: 5 * MIN },
+  standard: { label: 'Standard 25 + 10', mode: 'bank', main: 25 * MIN, over: 10 * MIN },
+  long: { label: 'Long 45 + 15', mode: 'bank', main: 45 * MIN, over: 15 * MIN },
+};
+const penaltyFor = usedOver => usedOver > 0 ? 10 * Math.ceil(usedOver / MIN) : 0;
+function nextTurn(d, from) {
+  const n = d.players.length;
+  for (let k = 1; k <= n; k++) { const i = (from + k) % n; if (!d.players[i].out) return i; }
+  return from;
+}
+// Moves the time used so far this turn off the current player's clock (host only).
+function chargeClock(d, now) {
+  const t = d.timer;
+  if (!t || t.mode !== 'bank' || !d.turnStart || d.paused || d.status !== 'playing') return;
+  const p = d.players[d.turn];
+  p.clock = Math.max(0, p.clock - Math.max(0, now - d.turnStart));
+  d.turnStart = now;
+  const pen = penaltyFor(Math.min(t.over, t.over - p.clock));
+  if (pen > (p.penalty || 0)) { p.score -= pen - (p.penalty || 0); p.penalty = pen; }
+}
+// Checked every second by the host. Returns true when it changed the game.
+function checkTimeout(d, now) {
+  const t = d.timer;
+  if (!t || !d.turnStart || d.paused || d.status !== 'playing') return false;
+  const p = d.players[d.turn];
+  if (t.mode === 'move') {
+    if (now - d.turnStart < t.move) return false;
+    scorelessTurn(d, d.turn, { kind: 'timepass', p: d.turn });
+    d.turnStart = now;
+    return true;
+  }
+  if (p.clock - (now - d.turnStart) > 0) return false;
+  chargeClock(d, now);
+  p.clock = 0; p.out = true;
+  d.lastMove = { by: p.id, cells: [] };
+  d.log.push({ kind: 'timeout', p: d.turn });
+  if (d.players.filter(x => !x.out).length < 2) finishGame(d, 'timeout', null);
+  else { d.turn = nextTurn(d, d.turn); d.turnStart = now; }
+  return true;
+}
+
 function finishGame(d, reason, outIdx) {
   let pool = 0;
   d.players.forEach((p, i) => {
@@ -452,11 +508,18 @@ function scorelessTurn(d, mi, entry) {
   d.lastMove = { by: d.players[mi].id, cells: [] };
   d.log.push(entry);
   if (d.scoreless >= 6) finishGame(d, 'stalled', null);
-  else d.turn = (mi + 1) % d.players.length;
+  else d.turn = nextTurn(d, mi);
 }
 // Applies one action from player `pid` to state `d` (mutating it). Returns an error message, or '' on success.
 function applyAction(d, pid, a, dict) {
   if (!a || typeof a !== 'object') return 'Unknown action.';
+  const now = Date.now(), prevTurn = d.turn;
+  if (d.status === 'playing' && ['play', 'pass', 'swap', 'skip', 'end'].includes(a.kind)) chargeClock(d, now);
+  const err = applyRules(d, pid, a, dict);
+  if (!err && d.status === 'playing' && d.timer && (d.turn !== prevTurn || a.kind === 'start')) d.turnStart = now;
+  return err;
+}
+function applyRules(d, pid, a, dict) {
   const mi = d.players ? d.players.findIndex(p => p.id === pid) : -1;
   switch (a.kind) {
     case 'start': {
@@ -466,8 +529,16 @@ function applyAction(d, pid, a, dict) {
       let bag = freshBag();
       const order = seats.slice();
       for (let i = order.length - 1; i > 0; i--) { const j = rand(i + 1); [order[i], order[j]] = [order[j], order[i]]; }
-      d.players = order.map(s => { const rack = bag.slice(-7); bag = bag.slice(0, -7); return { id: s.id, name: s.name, score: 0, rack }; });
+      const tm = TIMERS[d.timerChoice] || TIMERS.off;
+      d.timer = tm.mode ? { mode: tm.mode, main: tm.main || 0, over: tm.over || 0, move: tm.move || 0, label: tm.label } : null;
+      d.players = order.map(s => { const rack = bag.slice(-7); bag = bag.slice(0, -7); return { id: s.id, name: s.name, score: 0, rack, clock: d.timer ? d.timer.main + d.timer.over : 0, penalty: 0 }; });
       Object.assign(d, { status: 'playing', board: EMPTY, bag, turn: 0, scoreless: 0, log: [], lastMove: null, startedAt: Date.now() });
+      return '';
+    }
+    case 'timer': {
+      if (pid !== d.hostId || d.status !== 'lobby') return 'Only the host can set the timer.';
+      if (!TIMERS[a.choice]) return 'Unknown timer.';
+      d.timerChoice = a.choice;
       return '';
     }
     case 'leave': {
@@ -502,7 +573,7 @@ function applyAction(d, pid, a, dict) {
       d.lastMove = { by: pid, cells: [...pend.keys()] };
       d.log.push({ kind: 'play', p: mi, words: ev.words.map(w => w.text), score: ev.score, bingo: ev.bingo });
       if (!p.rack.length && !d.bag.length) finishGame(d, 'out', mi);
-      else d.turn = (mi + 1) % d.players.length;
+      else d.turn = nextTurn(d, mi);
       return '';
     }
     case 'pass': {
@@ -668,6 +739,7 @@ function startHost(code, state, resuming) {
       store.set('tt-session', JSON.stringify({ role: 'host', code }));
       S.phase = 'table';
       S.game = state;
+      if (state.status === 'playing' && state.timer) state.turnStart = Date.now();
       if (state.paused) {
         state.paused = false;
         state.lastMove = { by: S.me, cells: [] };
@@ -688,8 +760,13 @@ function startHost(code, state, resuming) {
     if (NET.client !== c || !c.connected) return;
     const now = Date.now();
     for (const [pid, seen] of NET.guests) if (now - seen > 30000) NET.guests.delete(pid);
+    if (S.game) chargeClock(S.game, now);
     bumpHost(false);
   }, 15000));
+  NET.timers.push(setInterval(() => {
+    if (NET.client !== c || !S.game) return;
+    if (checkTimeout(S.game, Date.now())) bumpHost(true);
+  }, 1000));
 }
 function sendToGuest(pid, m) { try { NET.client?.publish(topic(S.code, 'to/' + pid), JSON.stringify(m), { qos: 1 }); } catch {} }
 function onGuestMessage(m) {
@@ -733,7 +810,9 @@ function bumpHost(changed) {
 }
 function hostPause() {
   const d = hostState(); if (!d || d.status !== 'playing' || d.paused) return;
+  chargeClock(d, Date.now());
   d.paused = true;
+  d.turnStart = null;
   d.lastMove = { by: S.me, cells: [] };
   d.log.push({ kind: 'pause', p: Math.max(0, d.players.findIndex(p => p.id === S.me)) });
   bumpHost(true);
@@ -826,6 +905,7 @@ function act(action) {
 function setGame(data) {
   const prev = S.lastVersion;
   S.game = data;
+  S.recvAt = Date.now();
   const mi = myIndex();
   if (data.board) for (const [i] of S.pend) if (data.board[i] !== '.') S.pend.delete(i);
   if (data.status !== 'lobby' && mi >= 0) syncRack(String(data.players[mi].rack || ''));
@@ -850,6 +930,8 @@ function describe(e, data) {
   if (e.kind === 'pass') return `${who} passed`;
   if (e.kind === 'skip') return `${who}'s turn was skipped by the host`;
   if (e.kind === 'end') return 'Game over';
+  if (e.kind === 'timeout') return `${who} ran out of time and is out of the game`;
+  if (e.kind === 'timepass') return `${who} ran out of time, so their turn was passed`;
   if (e.kind === 'pause') return `${who} paused the game. It carries on when they open it again.`;
   if (e.kind === 'resume') return `${who} is back. The game carries on.`;
   return '';
@@ -1091,7 +1173,7 @@ function renderSide() {
     const off = !isOnline(p.id);
     return `<div class="score${now ? ' now' : ''}">
       <span class="dot" style="background:${SEATS[i]}"></span>
-      <span class="nm"><strong>${esc(p.name)}${p.id === S.me ? ' (you)' : ''}</strong><span>${now ? 'Playing now · ' : ''}${String(p.rack || '').length} tiles${off ? ' · offline' : ''}</span></span>
+      <span class="nm"><strong>${esc(p.name)}${p.id === S.me ? ' (you)' : ''}</strong><span>${p.out ? 'Out of time · ' : now ? 'Playing now · ' : ''}${String(p.rack || '').length} tiles${off ? ' · offline' : ''}${d.timer ? ` · <span class="clk" data-clock="${i}"></span>` : ''}<span class="pen" data-pen="${i}"></span></span></span>
       <span class="pts">${Number(p.score) || 0}</span>
     </div>`;
   }).join('');
@@ -1106,6 +1188,8 @@ function renderSide() {
     else if (e.kind === 'pass') what = `${nm} passed`;
     else if (e.kind === 'skip') what = `${nm} was skipped`;
     else if (e.kind === 'pause') what = `${nm} paused the game`;
+    else if (e.kind === 'timeout') what = `${nm} ran out of time`;
+    else if (e.kind === 'timepass') what = `${nm} ran out of time (pass)`;
     else if (e.kind === 'resume') what = `${nm} resumed the game`;
     return `<li><span class="dot" style="background:${SEATS[e.p] || 'var(--muted)'}"></span><span class="what">${what}</span><span class="n">${e.kind === 'play' ? '+' + (Number(e.score) || 0) : ''}</span></li>`;
   }).join('') : '<li><span></span><span class="what muted">No moves yet. The first word must cover the star.</span><span></span></li>';
@@ -1127,7 +1211,7 @@ function renderTurnLine() {
   if (d.status === 'done') { el.innerHTML = `<span class="pill wait">Game over</span><button class="btn small" type="button" id="showEnd">Final scores</button>`; return; }
   const cur = d.players[d.turn];
   if (d.paused) { el.innerHTML = `<span class="pill wait">Game paused</span><span class="muted" style="font-weight:500">It carries on when ${esc(d.hostName || 'the host')} opens it again.</span>`; return; }
-  if (isMyTurn()) el.innerHTML = `<span class="pill go">Your turn</span>`;
+  if (isMyTurn()) el.innerHTML = `<span class="pill go">Your turn</span>${d.timer ? '<span class="myclock" id="myClock"></span>' : ''}`;
   else if (myIndex() < 0) el.innerHTML = `<span class="pill wait">Watching · ${esc(cur?.name)} to play</span>`;
   else el.innerHTML = `<span class="pill wait">Waiting for ${esc(cur?.name)}${isOnline(cur?.id) && !(S.role === 'guest' && hostAway) ? '' : ' (offline)'}</span>`;
 }
@@ -1136,13 +1220,13 @@ document.addEventListener('click', e => { if (e.target.id === 'showEnd') { S.end
 function renderEnd() {
   const d = g(); const dlg = $('#endDlg');
   if (d.status !== 'done' || S.endDismissed) { dlg.hidden = true; return; }
-  const ranked = d.players.map((p, i) => ({ ...p, i })).sort((a, b) => b.score - a.score);
+  const ranked = d.players.map((p, i) => ({ ...p, i })).sort((a, b) => (a.out ? 1 : 0) - (b.out ? 1 : 0) || b.score - a.score);
   const top = ranked[0].score;
-  const winners = ranked.filter(p => p.score === top);
+  const winners = ranked.filter(p => p.score === top && !p.out);
   $('#endTitle').textContent = winners.length > 1 ? `Tie at ${top}: ${winners.map(w => w.name).join(' & ')}` : `${winners[0].name} wins with ${top}`;
-  const why = { out: `${d.players[d.outIdx]?.name || 'A player'} went out and collects everyone's leftover tiles.`, stalled: 'Six scoreless turns in a row ended the game. Leftover tiles are subtracted.', ended: 'The host ended the game. Leftover tiles are subtracted.' }[d.endReason] || '';
+  const why = { out: `${d.players[d.outIdx]?.name || 'A player'} went out and collects everyone's leftover tiles.`, stalled: 'Six scoreless turns in a row ended the game. Leftover tiles are subtracted.', ended: 'The host ended the game. Leftover tiles are subtracted.', timeout: 'Everyone else ran out of time. Players who run out of time finish last.' }[d.endReason] || '';
   $('#endWhy').textContent = why;
-  $('#finalList').innerHTML = ranked.map(p => `<li><span class="dot" style="background:${SEATS[p.i]}"></span><span style="min-width:0;display:flex;flex-direction:column"><strong>${esc(p.name)}${p.id === S.me ? ' (you)' : ''}</strong><span class="adj">${p.adj ? (p.adj > 0 ? '+' : '') + p.adj + ' for leftover tiles' : 'No leftover tiles'}</span></span><span class="pts">${p.score}</span></li>`).join('');
+  $('#finalList').innerHTML = ranked.map(p => `<li><span class="dot" style="background:${SEATS[p.i]}"></span><span style="min-width:0;display:flex;flex-direction:column"><strong>${esc(p.name)}${p.id === S.me ? ' (you)' : ''}</strong><span class="adj">${p.out ? 'Ran out of time · ' : ''}${p.adj ? (p.adj > 0 ? '+' : '') + p.adj + ' for leftover tiles' : 'No leftover tiles'}${p.penalty ? ` · −${p.penalty} overtime` : ''}</span></span><span class="pts">${p.score}</span></li>`).join('');
   dlg.hidden = false;
 }
 $('#endView').addEventListener('click', () => { S.endDismissed = true; render(); });
@@ -1161,6 +1245,10 @@ function renderWait() {
       : `<div class="seat open"><span class="dot" style="background:var(--line)"></span>Open seat</div>`;
   }
   $('#seatList').innerHTML = html;
+  const choice = TIMERS[d.timerChoice] ? d.timerChoice : 'off';
+  $('#timerBox').innerHTML = d.hostId === S.me
+    ? `<h2>Timer</h2><div class="timers">${Object.entries(TIMERS).map(([k, t]) => `<button class="btn small" type="button" data-timer="${k}" aria-pressed="${k === choice}">${t.label}</button>`).join('')}</div><p class="muted" style="margin:0;font-size:13px">${TIMER_HELP[choice]}</p>`
+    : `<h2>Timer</h2><p style="margin:0">${esc(TIMERS[choice].label)}</p><p class="muted" style="margin:0;font-size:13px">${TIMER_HELP[choice]}</p>`;
   const seated = seats.some(s => s.id === S.me);
   let a = '';
   if (d.hostId === S.me) a += `<button class="btn primary" type="button" id="startBtn" ${seats.length >= 2 ? '' : 'disabled'}>${seats.length >= 2 ? `Start game with ${seats.length}` : 'Waiting for players'}</button>`;
@@ -1169,6 +1257,14 @@ function renderWait() {
   a += `<button class="btn" type="button" id="leaveBtn">${d.hostId === S.me ? 'Close table' : 'Leave'}</button>`;
   $('#waitActions').innerHTML = a;
 }
+const TIMER_HELP = {
+  off: 'Take as long as you like on each turn.',
+  move: 'Each turn has 2 minutes. When it runs out, the turn is passed automatically.',
+  quick: 'Each player has 15 minutes for the whole game, plus 5 minutes of overtime. Overtime costs 10 points per minute; running out of it puts you out of the game.',
+  standard: 'Each player has 25 minutes for the whole game, plus 10 minutes of overtime. Overtime costs 10 points per minute; running out of it puts you out of the game.',
+  long: 'Each player has 45 minutes for the whole game, plus 15 minutes of overtime. Overtime costs 10 points per minute; running out of it puts you out of the game.',
+};
+$('#timerBox').addEventListener('click', e => { const b = e.target.closest('[data-timer]'); if (b) act({ kind: 'timer', choice: b.dataset.timer }); });
 $('#waitActions').addEventListener('click', e => {
   const id = e.target.closest('button')?.id;
   if (id === 'startBtn') act({ kind: 'start' });
@@ -1246,7 +1342,7 @@ function render() {
   if (view === 'lobby') { renderGames(); return; }
   if (view === 'connect') { $('#connectTitle').textContent = S.role === 'host' ? 'Opening your table' : 'Joining table ' + S.code; $('#connectMsg').textContent = S.connectMsg; return; }
   if (view === 'wait') { renderWait(); return; }
-  renderTurnLine(); renderBoard(); renderRack(); renderSide(); renderEnd();
+  renderTurnLine(); renderBoard(); renderRack(); renderSide(); renderEnd(); updateClocks();
 }
 
 $('#createBtn').addEventListener('click', createTable);
@@ -1254,6 +1350,27 @@ $('#joinBtn').addEventListener('click', () => joinTable($('#codeIn').value));
 $('#codeIn').addEventListener('keydown', e => { if (e.key === 'Enter') joinTable($('#codeIn').value); });
 $('#nick').addEventListener('change', () => store.set('tt-nick', nick()));
 window.addEventListener('beforeunload', e => { if (S.role === 'host' && g()?.status === 'playing') { e.preventDefault(); e.returnValue = ''; } });
+
+// Clock display, refreshed twice a second without redrawing the board.
+const fmtClock = ms => { const sec = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0'); };
+function clockInfo(d, i) {
+  const t = d.timer, p = d.players[i];
+  const live = d.status === 'playing' && !d.paused && d.turn === i && d.turnStart;
+  const elapsed = live ? Math.max(0, (d.beat || d.turnStart) - d.turnStart) + (Date.now() - (S.recvAt || Date.now())) : 0;
+  if (t.mode === 'move') return { text: fmtClock(live ? t.move - elapsed : t.move), ot: live && t.move - elapsed < t.move / 6, pen: 0 };
+  const left = Math.max(0, (p.clock || 0) - elapsed);
+  if (p.out) return { text: '0:00', ot: true, pen: p.penalty || 0 };
+  if (left > t.over) return { text: fmtClock(left - t.over), ot: false, pen: p.penalty || 0 };
+  return { text: 'OT ' + fmtClock(left), ot: true, pen: Math.max(p.penalty || 0, penaltyFor(t.over - left)) };
+}
+function updateClocks() {
+  const d = g(); if (!d || !d.timer || !d.players) return;
+  document.querySelectorAll('[data-clock]').forEach(el => { const c = clockInfo(d, +el.dataset.clock); el.textContent = c.text; el.classList.toggle('ot', c.ot); });
+  document.querySelectorAll('[data-pen]').forEach(el => { const c = clockInfo(d, +el.dataset.pen); el.textContent = c.pen ? ` · −${c.pen}` : ''; });
+  const mine = $('#myClock'); const mi = myIndex();
+  if (mine && mi >= 0) { const c = clockInfo(d, mi); mine.textContent = c.text; mine.classList.toggle('ot', c.ot); }
+}
+setInterval(updateClocks, 500);
 
 // Version check: compare against the published version.txt so stale cached copies get noticed.
 function showUpdate(msg) { $('#updateMsg').textContent = msg; $('#updateBar').hidden = false; }
