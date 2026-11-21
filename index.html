@@ -215,6 +215,42 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
 .ver { font: 600 11px var(--f-body); color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; letter-spacing: .04em; }
 .update { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; padding: 10px 14px; border-radius: 12px; background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .update .btn { background: var(--accent-ink); color: var(--accent); border-color: var(--accent-ink); }
+
+/* Watch mode: read-only view of the board and scores, laid out to fill a TV when the screen is wide. */
+.board-wrap { position: relative; }
+.banner { position: absolute; left: 50%; top: 6%; z-index: 5; transform: translateX(-50%); max-width: 92%; display: flex; align-items: center; gap: .6em;
+  width: max-content; padding: .55em 1.1em; border-radius: 999px; background: var(--ink); color: var(--table); box-shadow: 0 1.5cqw 4cqw var(--shadow);
+  font: 700 clamp(15px, 3.4cqw, 34px)/1.2 var(--f-body); text-align: center; pointer-events: none; }
+.banner b { font-family: var(--f-tile); font-weight: 600; letter-spacing: .05em; }
+.banner .dot { width: .7em; height: .7em; }
+@media (prefers-reduced-motion: no-preference) {
+  .banner { animation: bannerIn .35s ease-out; }
+  body.tv .tile.fresh { animation: drop .35s ease-out, glow 2.4s ease-in-out 3; }
+}
+@keyframes bannerIn { from { opacity: 0; transform: translate(-50%, -30%); } }
+@keyframes glow { 50% { box-shadow: inset 0 -.45cqw 0 var(--tile-edge), 0 0 0 .5cqw var(--accent), 0 0 3cqw .6cqw rgba(242,184,75,.8); } }
+body.tv .wrap { max-width: none; padding-block: 10px 16px; }
+body.tv .foot, body.tv #legendCard { display: none; }
+body.tv .top { margin-bottom: 10px; }
+body.tv .chip { font-size: clamp(13px, 1.8vh, 20px); }
+body.tv .chip code { font-size: 1.15em; }
+body.tv .clk { font-size: inherit; }
+@media (min-width: 941px) {
+  body.tv .game { grid-template-columns: auto minmax(300px, 460px); justify-content: center; align-items: center; gap: 2.5vw; }
+  body.tv .board-wrap { width: min(calc(100dvh - 160px), calc(100vw - 580px)); max-width: none; }
+  body.tv .play-col { gap: 1.2vh; }
+  body.tv .turnline { font-size: clamp(16px, 2.6vh, 30px); }
+  body.tv .side { gap: 1.6vh; }
+  body.tv .side h2 { font-size: clamp(14px, 1.7vh, 20px); }
+  body.tv .score { grid-template-columns: clamp(12px, 1.6vh, 20px) minmax(0, 1fr) auto; padding: 1.4vh 18px; }
+  body.tv .score .dot { width: clamp(12px, 1.6vh, 20px); height: clamp(12px, 1.6vh, 20px); }
+  body.tv .score .nm strong { font-size: clamp(18px, 2.8vh, 34px); line-height: 1.2; }
+  body.tv .score .nm span { font-size: clamp(13px, 1.8vh, 22px); }
+  body.tv .score .pts { font-size: clamp(30px, 5.6vh, 68px); }
+  body.tv .bagline { font-size: clamp(14px, 1.9vh, 22px); }
+  body.tv .log { max-height: 28vh; font-size: clamp(14px, 1.9vh, 22px); }
+  body.tv .myclock { font-size: 1em; }
+}
 </style>
 </head>
 <body>
@@ -255,8 +291,9 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
             <input class="input code" id="codeIn" maxlength="4" placeholder="ABCD" autocomplete="off">
           </div>
           <button class="btn" id="joinBtn" type="button">Join</button>
+          <button class="btn" id="watchBtn" type="button">Watch</button>
         </div>
-        <p class="muted" style="margin:0;font-size:13px">Ask the host for the code shown at the top of their screen.</p>
+        <p class="muted" style="margin:0;font-size:13px">Ask the host for the code shown at the top of their screen. <strong>Watch</strong> shows just the board and scores, with no name needed. It works well on a TV.</p>
       </div>
       <div class="card stack" id="gamesCard" hidden>
         <h2>Your games</h2>
@@ -271,7 +308,7 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
         <h2>Table code</h2>
         <div class="bigcode" id="bigCode"></div>
         <p class="muted" style="margin:0" id="shareLine">Share this code with up to three friends. They open this page and join with it.</p>
-        <button class="btn small" type="button" id="copyLink">Copy invite link</button>
+        <div class="actions"><button class="btn small" type="button" id="copyLink">Copy invite link</button><button class="btn small" type="button" data-copywatch>Copy watch link</button></div>
       </div>
       <div class="card stack">
         <h2>Seats</h2>
@@ -296,7 +333,7 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
     <div class="game">
       <div class="play-col">
         <div class="turnline" id="turnLine"></div>
-        <div class="board-wrap"><div class="board" id="board"></div></div>
+        <div class="board-wrap"><div class="board" id="board"></div><div class="banner" id="banner" hidden aria-live="polite"></div></div>
         <div class="rack-area" id="rackArea">
           <div class="preview" id="preview"></div>
           <div class="ledge" id="rack"></div>
@@ -313,7 +350,7 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
           <h2>Moves</h2>
           <ul class="log" id="log"></ul>
         </div>
-        <div class="card stack">
+        <div class="card stack" id="legendCard">
           <h2>Squares</h2>
           <div class="legend">
             <span><i style="background:var(--tw)"></i>Triple word</span>
@@ -347,13 +384,13 @@ h2 { font-size: 15px; font-weight: 600; letter-spacing: .06em; text-transform: u
 </div>
 <div class="toast" id="toast" hidden></div>
 
-<script src="mqtt.min.js?v=5"></script>
+<script src="mqtt.min.js?v=6"></script>
 <script>
 (() => {
 'use strict';
 const $ = s => document.querySelector(s);
 // Bump APP_VERSION and version.txt together on every release.
-const APP_VERSION = '5';
+const APP_VERSION = '6';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // ---------- Rules data ----------
@@ -377,6 +414,10 @@ function freshBag() { let s = ''; for (const [ch, n] of Object.entries(COUNTS)) 
 function removeOne(str, ch) { const k = str.indexOf(ch); return k < 0 ? null : str.slice(0, k) + str.slice(k + 1); }
 function rackValue(rack) { let v = 0; for (const ch of rack) v += VALUES[ch] || 0; return v; }
 const isBlankCh = ch => ch !== ch.toUpperCase();
+// The host keeps the full game, but the copy it broadcasts has no racks and no bag order (see publicView), so these
+// read either form.
+const bagLeft = d => Array.isArray(d?.bag) || typeof d?.bag === 'string' ? d.bag.length : (Number(d?.bagCount) || 0);
+const rackCount = p => p?.rack != null ? String(p.rack).length : (Number(p?.rackCount) || 0);
 
 // ---------- Move evaluation ----------
 function cellAt(board, pend, r, c) {
@@ -616,8 +657,10 @@ const S = {
   code: null, game: null, role: null, phase: 'lobby', connectMsg: '',
   rack: [], pend: new Map(), selected: null, exchangeMode: false, exchangeSel: new Set(),
   busy: false, lastVersion: 0, armed: null, endDismissed: false, freshCells: new Set(), wasMyTurn: false,
+  rackMsg: null, rackAsk: 0,
 };
 let uid = 0;
+const tabStore = { get(k) { try { return sessionStorage.getItem(k); } catch { return null; } }, set(k, v) { try { v == null ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch {} } };
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} } };
 // Games this device has hosted or joined, so paused games can be picked up later.
 function loadGames() { try { const a = JSON.parse(store.get('tt-games') || '[]'); return Array.isArray(a) ? a.filter(x => x && /^[A-Z]{4}$/.test(x.code || '')) : []; } catch { return []; } }
@@ -630,7 +673,11 @@ function rememberGame(d, role) {
 }
 function forgetGame(code) { saveGames(loadGames().filter(x => x.code !== code)); store.set('tt-host-' + code, null); }
 S.me = store.get('tt-pid');
-if (!S.me) { S.me = 'p' + Array.from(crypto.getRandomValues(new Uint8Array(9)), b => b.toString(36).padStart(2, '0')).join(''); store.set('tt-pid', S.me); }
+const newId = p => p + Array.from(crypto.getRandomValues(new Uint8Array(9)), b => b.toString(36).padStart(2, '0')).join('');
+if (!S.me) { S.me = newId('p'); store.set('tt-pid', S.me); }
+// A watcher gets its own id per browser tab, so a TV tab never gets mixed up with a player on the same computer.
+S.watchId = tabStore.get('tt-watch-id');
+if (!S.watchId) { S.watchId = newId('w'); tabStore.set('tt-watch-id', S.watchId); }
 
 function toast(msg, ms = 3200) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
@@ -638,7 +685,7 @@ function toast(msg, ms = 3200) {
 }
 function nick() { return $('#nick').value.trim().slice(0, 16) || 'Player'; }
 const g = () => S.game;
-const myIndex = () => g()?.players ? g().players.findIndex(p => p.id === S.me) : -1;
+const myIndex = () => S.role !== 'watch' && g()?.players ? g().players.findIndex(p => p.id === S.me) : -1;
 const isPlaying = () => g()?.status === 'playing' && !g().paused;
 const isMyTurn = () => isPlaying() && myIndex() >= 0 && g().turn === myIndex();
 
@@ -679,11 +726,12 @@ function syncRack(str) {
 
 // ---------- Networking ----------
 // Everyone connects out to a public MQTT relay over secure WebSockets, which works on mobile data and strict Wi-Fi.
-// The host's browser holds the game: guests send it actions, and it publishes the whole state back (retained, so
-// anyone who reconnects gets it at once).
+// The host's browser holds the game: guests send it actions, and it publishes the state back (retained, so anyone
+// who reconnects gets it at once). The published copy leaves out every rack and the bag; each player is sent their
+// own rack on their private topic. Watchers only read the published copy.
 const BROKER = window.TT_BROKER || 'wss://broker.hivemq.com:8884/mqtt';
 const topic = (code, rest) => 'tiletable/v2/' + code + '/' + rest;
-const NET = { client: null, guests: new Map(), timers: [], gotState: false, joinTimer: null, lastBeat: 0 };
+const NET = { client: null, guests: new Map(), watchers: new Map(), timers: [], gotState: false, joinTimer: null, lastBeat: 0 };
 const STALE_MS = 60000;
 
 function mqttClient() {
@@ -695,24 +743,26 @@ function mqttClient() {
 function resetNet() {
   for (const t of NET.timers) clearInterval(t);
   clearTimeout(NET.joinTimer);
-  NET.timers = []; NET.guests.clear(); NET.gotState = false; NET.lastBeat = 0;
+  NET.timers = []; NET.guests.clear(); NET.watchers.clear(); NET.gotState = false; NET.lastBeat = 0;
   try { NET.client?.end(true); } catch {}
   NET.client = null;
 }
 function resetLocal() {
   S.game = null; S.pend.clear(); S.rack = []; S.selected = null; S.exchangeMode = false; S.exchangeSel.clear();
-  S.lastVersion = 0; S.endDismissed = false; S.wasMyTurn = false; S.busy = false;
+  S.lastVersion = 0; S.endDismissed = false; S.wasMyTurn = false; S.busy = false; S.rackMsg = null; S.rackAsk = 0;
+  hideBanner();
 }
 function goHome() {
   if (S.role === 'guest') sendToHost({ t: 'action', action: { kind: 'leave' } });
+  if (S.role === 'watch') sendToHost({ t: 'unwatch' });
   const c = NET.client; NET.client = null;
   setTimeout(() => { try { c?.end(); } catch {} }, 300);
   for (const t of NET.timers) clearInterval(t);
   clearTimeout(NET.joinTimer);
-  NET.timers = []; NET.guests.clear(); NET.gotState = false;
+  NET.timers = []; NET.guests.clear(); NET.watchers.clear(); NET.gotState = false;
+  if (S.role === 'watch') tabStore.set('tt-watching', null); else store.set('tt-session', null);
   resetLocal();
   S.code = null; S.role = null; S.phase = 'lobby';
-  store.set('tt-session', null);
   document.title = 'Tile Table';
   render();
 }
@@ -760,6 +810,7 @@ function startHost(code, state, resuming) {
     if (NET.client !== c || !c.connected) return;
     const now = Date.now();
     for (const [pid, seen] of NET.guests) if (now - seen > 30000) NET.guests.delete(pid);
+    for (const [pid, seen] of NET.watchers) if (now - seen > 30000) NET.watchers.delete(pid);
     if (S.game) chargeClock(S.game, now);
     bumpHost(false);
   }, 15000));
@@ -774,6 +825,9 @@ function onGuestMessage(m) {
   const pid = String(m.pid || '').slice(0, 40);
   if (!pid) return;
   if (pid === S.me) return;
+  if (m.t === 'watch') { const isNew = !NET.watchers.has(pid); NET.watchers.set(pid, Date.now()); if (isNew) bumpHost(false); return; }
+  if (m.t === 'unwatch') { if (NET.watchers.delete(pid)) bumpHost(false); return; }
+  if (pid.startsWith('w')) return; // watcher ids never play
   const wasOnline = NET.guests.has(pid);
   NET.guests.set(pid, Date.now());
   if (m.t === 'hello') {
@@ -786,9 +840,11 @@ function onGuestMessage(m) {
       else if (d.seats.length < 4) { d.seats.push({ id: pid, name, joinedAt: Date.now() }); changed = true; }
     }
     bumpHost(changed);
+    sendRack(pid);
     return;
   }
-  if (m.t === 'ping') { if (!wasOnline) bumpHost(false); return; }
+  if (m.t === 'ping') { if (!wasOnline) { bumpHost(false); sendRack(pid); } return; }
+  if (m.t === 'rack?') { sendRack(pid); return; }
   if (m.t === 'action') {
     const err = applyAction(d, pid, m.action, S.dict);
     if (err) { sendToGuest(pid, { t: 'error', msg: err }); return; }
@@ -796,16 +852,31 @@ function onGuestMessage(m) {
     bumpHost(true);
   }
 }
+// Sends a player their own rack, tagged with the game version it belongs to.
+function sendRack(pid) {
+  const d = hostState(); const p = d?.players?.find(x => x.id === pid);
+  if (p && pid !== S.me) sendToGuest(pid, { t: 'rack', v: d.version || 0, rack: String(p.rack || '') });
+}
+// The copy of the game everyone can read: rack sizes and the bag size, but not the tiles themselves.
+function publicView(d) {
+  const v = { ...d };
+  if (d.bag != null) { v.bagCount = bagLeft(d); delete v.bag; }
+  if (Array.isArray(d.players)) v.players = d.players.map(({ rack, ...p }) => ({ ...p, rackCount: String(rack || '').length }));
+  return v;
+}
 function bumpHost(changed) {
   const d = hostState(); if (!d) return;
   d.online = [S.me, ...NET.guests.keys()];
+  d.watching = NET.watchers.size;
   if (changed) { d.version = (d.version || 0) + 1; d.updatedAt = Date.now(); }
   d.beat = Date.now();
   d.appVersion = APP_VERSION;
   if (d.log && d.log.length > 120) d.log = d.log.slice(-120);
   saveHost();
   rememberGame(d, 'host');
-  try { NET.client?.publish(topic(S.code, 'state'), JSON.stringify(d), { qos: 1, retain: true }); } catch {}
+  // Racks go out first so each player usually has theirs by the time the new board arrives.
+  if (changed && d.status !== 'lobby') for (const p of d.players || []) sendRack(p.id);
+  try { NET.client?.publish(topic(S.code, 'state'), JSON.stringify(publicView(d)), { qos: 1, retain: true }); } catch {}
   setGame(d);
 }
 function hostPause() {
@@ -827,19 +898,20 @@ function hostCloseTable() {
 function sendToHost(m) {
   const c = NET.client;
   if (!c || !c.connected || !S.code) return false;
-  try { c.publish(topic(S.code, 'to-host'), JSON.stringify({ ...m, pid: S.me }), { qos: 1 }); return true; } catch { return false; }
+  try { c.publish(topic(S.code, 'to-host'), JSON.stringify({ ...m, pid: S.role === 'watch' ? S.watchId : S.me }), { qos: 1 }); return true; } catch { return false; }
 }
-function startGuest(code, resuming) {
+// Joins a table as a player, or with watch set, as a read-only watcher (no seat, no rack, no name needed).
+function startGuest(code, resuming, watch) {
   resetNet(); resetLocal();
-  S.role = 'guest'; S.code = code; S.phase = 'connect';
+  S.role = watch ? 'watch' : 'guest'; S.code = code; S.phase = 'connect';
   S.connectMsg = `Looking for table ${code}…`;
   render();
   const c = mqttClient();
   NET.client = c;
   c.on('connect', () => {
     if (NET.client !== c) return;
-    c.subscribe([topic(code, 'state'), topic(code, 'to/' + S.me)], { qos: 1 }, () => {
-      sendToHost({ t: 'hello', name: nick(), v: APP_VERSION });
+    c.subscribe(watch ? [topic(code, 'state')] : [topic(code, 'state'), topic(code, 'to/' + S.me)], { qos: 1 }, () => {
+      sendToHost(watch ? { t: 'watch', v: APP_VERSION } : { t: 'hello', name: nick(), v: APP_VERSION });
     });
     clearTimeout(NET.joinTimer);
     if (!NET.gotState) NET.joinTimer = setTimeout(() => {
@@ -857,32 +929,54 @@ function startGuest(code, resuming) {
       if (!d || d.code !== code) return;
       if (d.appVersion !== APP_VERSION) { showUpdate(`The host is on version ${String(d.appVersion || 'old').slice(0, 8)} and you're on version ${APP_VERSION}. Ask whoever has the older version to reload.`); return; }
       const stale = Date.now() - (d.beat || 0) > STALE_MS;
-      const inGame = (d.seats || []).some(s => s.id === S.me) || (d.players || []).some(p => p.id === S.me);
-      if (!NET.gotState && stale && !inGame) return; // an old table nobody is hosting any more
+      const inGame = !watch && ((d.seats || []).some(s => s.id === S.me) || (d.players || []).some(p => p.id === S.me));
+      if (!NET.gotState && stale && !inGame && !(watch && resuming)) return; // an old table nobody is hosting any more
       NET.gotState = true; NET.lastBeat = Date.now();
       clearTimeout(NET.joinTimer);
-      store.set('tt-session', JSON.stringify({ role: 'guest', code }));
-      rememberGame(d, 'guest');
-      store.set('tt-nick', nick());
       S.phase = 'table'; S.busy = false;
-      if (d.online && !d.online.includes(S.me) && Date.now() - (NET.lastPing || 0) > 2000) { NET.lastPing = Date.now(); sendToHost({ t: 'ping' }); }
+      if (watch) tabStore.set('tt-watching', code);
+      else {
+        store.set('tt-session', JSON.stringify({ role: 'guest', code }));
+        rememberGame(d, 'guest');
+        store.set('tt-nick', nick());
+        if (d.online && !d.online.includes(S.me) && Date.now() - (NET.lastPing || 0) > 2000) { NET.lastPing = Date.now(); sendToHost({ t: 'ping' }); }
+      }
       if (stale) toast('The host seems to be away. The game continues when they open the page again.', 5000);
       setGame(d);
     } else {
       let m; try { m = JSON.parse(raw); } catch { return; }
       if (m?.t === 'error') { S.busy = false; toast(String(m.msg || 'That did not work.'), 4500); render(); }
+      else if (m?.t === 'rack' && !watch) onRack(m);
     }
   });
   c.on('offline', onOffline);
   c.on('error', () => {});
   NET.timers.push(setInterval(() => {
     if (NET.client !== c) return;
-    sendToHost({ t: 'ping' });
+    sendToHost(watch ? { t: 'watch', v: APP_VERSION } : { t: 'ping' });
     if (NET.gotState && Date.now() - NET.lastBeat > 45000 && !hostAway) { hostAway = true; render(); }
     else if (Date.now() - NET.lastBeat <= 45000 && hostAway) { hostAway = false; render(); }
   }, 10000));
 }
 let hostAway = false;
+function startWatch(code, resuming) { startGuest(code, resuming, true); }
+// A player's own rack arrives privately. It is used once the board it belongs to (same version) is showing.
+function onRack(m) {
+  const v = Number(m.v) || 0;
+  if (S.rackMsg && v < S.rackMsg.v) return;
+  S.rackMsg = { v, rack: String(m.rack || '') };
+  if (S.game && (S.game.version || 0) === v && myIndex() >= 0) { syncRack(S.rackMsg.rack); render(); }
+}
+function needRack() {
+  if (S.role !== 'guest' || !S.game || S.game.status === 'lobby' || myIndex() < 0) return;
+  if (S.rackMsg && S.rackMsg.v === (S.game.version || 0)) return;
+  const v = S.game.version || 0;
+  setTimeout(() => {
+    if (S.role !== 'guest' || !S.game || (S.game.version || 0) !== v || (S.rackMsg && S.rackMsg.v === v)) return;
+    if (Date.now() - S.rackAsk < 2500) return;
+    S.rackAsk = Date.now(); sendToHost({ t: 'rack?' });
+  }, 1500);
+}
 
 // Actions from this device
 function act(action) {
@@ -908,11 +1002,16 @@ function setGame(data) {
   S.recvAt = Date.now();
   const mi = myIndex();
   if (data.board) for (const [i] of S.pend) if (data.board[i] !== '.') S.pend.delete(i);
-  if (data.status !== 'lobby' && mi >= 0) syncRack(String(data.players[mi].rack || ''));
+  if (data.status !== 'lobby' && mi >= 0) {
+    if (S.role === 'host') syncRack(String(data.players[mi].rack || ''));
+    else if (S.rackMsg && S.rackMsg.v === (data.version || 0)) syncRack(S.rackMsg.rack);
+    else needRack();
+  }
   if (prev && data.version > prev && data.lastMove) {
-    if (data.lastMove.by !== S.me && (data.log || []).length) {
+    if ((S.role === 'watch' || data.lastMove.by !== S.me) && (data.log || []).length) {
       const e = data.log[data.log.length - 1];
-      const msg = describe(e, data); if (msg) toast(msg);
+      if (S.role === 'watch') showBanner(e, data);
+      else { const msg = describe(e, data); if (msg) toast(msg); }
     }
     S.freshCells = new Set(data.lastMove.cells || []);
   } else S.freshCells = new Set();
@@ -920,9 +1019,21 @@ function setGame(data) {
   const mine = isMyTurn();
   if (mine && !S.wasMyTurn && prev) chime();
   S.wasMyTurn = mine;
-  document.title = mine ? 'Your turn · Tile Table' : 'Tile Table';
+  document.title = S.role === 'watch' ? `Watching ${S.code} · Tile Table` : mine ? 'Your turn · Tile Table' : 'Tile Table';
   render();
 }
+// Big announcement over the board for watchers, so people across the room catch each move.
+function showBanner(e, data) {
+  const p = data.players?.[e.p]; const who = esc(p ? p.name : 'Someone');
+  const dot = e.p != null && SEATS[e.p] ? `<span class="dot" style="background:${SEATS[e.p]}"></span>` : '';
+  let html = '';
+  if (e.kind === 'play') html = `${dot}<span>${who} played ${(e.words || []).map(w => `<b>${esc(w)}</b>`).join(', ')} for ${Number(e.score) || 0}${e.bingo ? '. Bingo!' : ''}</span>`;
+  else { const msg = describe(e, data); if (msg) html = `${dot}<span>${esc(msg)}</span>`; }
+  if (!html) return;
+  const b = $('#banner'); b.innerHTML = html; b.hidden = false;
+  clearTimeout(showBanner.h); showBanner.h = setTimeout(hideBanner, e.kind === 'play' ? 7000 : 5000);
+}
+function hideBanner() { const b = $('#banner'); if (b) b.hidden = true; }
 function describe(e, data) {
   const p = data.players?.[e.p]; const who = p ? p.name : 'Someone';
   if (e.kind === 'play') return `${who} played ${e.words.join(', ')} for ${e.score}${e.bingo ? ' (bingo!)' : ''}`;
@@ -944,6 +1055,11 @@ function createTable() {
   const code = genCode(), now = Date.now();
   startHost(code, { code, status: 'lobby', hostId: S.me, hostName: name, createdAt: now, updatedAt: now, seats: [{ id: S.me, name, joinedAt: now }], version: 1 }, false);
 }
+function watchTable(code) {
+  code = String(code || '').trim().toUpperCase();
+  if (!/^[A-Z]{4}$/.test(code)) return toast('Table codes are four letters.');
+  startWatch(code, false);
+}
 function joinTable(code) {
   code = String(code || '').trim().toUpperCase();
   if (!/^[A-Z]{4}$/.test(code)) return toast('Table codes are four letters.');
@@ -953,6 +1069,7 @@ function joinTable(code) {
 }
 function closeTable() {
   const d = g();
+  if (S.role === 'watch') { goHome(); return; }
   if (d && d.status === 'lobby') {
     if (S.role === 'host') hostCloseTable();
     forgetGame(S.code);
@@ -973,7 +1090,7 @@ function exchangeTiles() {
   if (!isMyTurn() || S.busy) return;
   const chars = S.rack.filter(t => S.exchangeSel.has(t.id)).map(t => t.ch);
   if (!chars.length) return toast('Tap the tiles you want to swap.');
-  if (g().bag.length < 7) return toast('Swapping needs at least 7 tiles left in the bag.');
+  if (bagLeft(g()) < 7) return toast('Swapping needs at least 7 tiles left in the bag.');
   if (act({ kind: 'swap', chars })) { S.exchangeMode = false; S.exchangeSel.clear(); render(); }
 }
 function arm(key, fn) {
@@ -1139,7 +1256,7 @@ function renderRack() {
   const my = isMyTurn() && !S.busy;
   const ev = S.pend.size ? evaluate(boardStr(), S.pend) : null;
   const validWords = ev && ev.ok && (!S.dict || ev.words.every(w => S.dict.has(w.text)));
-  const bagN = g().bag?.length || 0;
+  const bagN = bagLeft(g());
   let a = '';
   if (S.exchangeMode) {
     a += `<button class="btn" type="button" data-act="cancelSwap">Cancel</button>`;
@@ -1173,11 +1290,11 @@ function renderSide() {
     const off = !isOnline(p.id);
     return `<div class="score${now ? ' now' : ''}">
       <span class="dot" style="background:${SEATS[i]}"></span>
-      <span class="nm"><strong>${esc(p.name)}${p.id === S.me ? ' (you)' : ''}</strong><span>${p.out ? 'Out of time · ' : now ? 'Playing now · ' : ''}${String(p.rack || '').length} tiles${off ? ' · offline' : ''}${d.timer ? ` · <span class="clk" data-clock="${i}"></span>` : ''}<span class="pen" data-pen="${i}"></span></span></span>
+      <span class="nm"><strong>${esc(p.name)}${p.id === S.me ? ' (you)' : ''}</strong><span>${p.out ? 'Out of time · ' : now ? 'Playing now · ' : ''}${rackCount(p)} tiles${off ? ' · offline' : ''}${d.timer ? ` · <span class="clk" data-clock="${i}"></span>` : ''}<span class="pen" data-pen="${i}"></span></span></span>
       <span class="pts">${Number(p.score) || 0}</span>
     </div>`;
   }).join('');
-  $('#bagCount').textContent = String(d.bag?.length || 0);
+  $('#bagCount').textContent = String(bagLeft(d));
   const log = (d.log || []).slice().reverse();
   $('#log').innerHTML = log.length ? log.map(e => {
     if (e.kind === 'end') return `<li><span></span><span class="what muted">Game over</span><span></span></li>`;
@@ -1194,6 +1311,7 @@ function renderSide() {
     return `<li><span class="dot" style="background:${SEATS[e.p] || 'var(--muted)'}"></span><span class="what">${what}</span><span class="n">${e.kind === 'play' ? '+' + (Number(e.score) || 0) : ''}</span></li>`;
   }).join('') : '<li><span></span><span class="what muted">No moves yet. The first word must cover the star.</span><span></span></li>';
   let hb = '';
+  if (S.role !== 'watch') hb += `<button class="btn small" type="button" data-copywatch>Copy watch link</button>`;
   if (d.hostId === S.me && d.status === 'playing') {
     const cur = d.players[d.turn];
     if (cur && cur.id !== S.me) hb += `<button class="btn small${S.armed === 'skip' ? ' warn' : ''}" type="button" data-host="skip">${S.armed === 'skip' ? 'Tap again to skip' : `Skip ${esc(cur.name)}'s turn`}</button>`;
@@ -1212,6 +1330,7 @@ function renderTurnLine() {
   const cur = d.players[d.turn];
   if (d.paused) { el.innerHTML = `<span class="pill wait">Game paused</span><span class="muted" style="font-weight:500">It carries on when ${esc(d.hostName || 'the host')} opens it again.</span>`; return; }
   if (isMyTurn()) el.innerHTML = `<span class="pill go">Your turn</span>${d.timer ? '<span class="myclock" id="myClock"></span>' : ''}`;
+  else if (S.role === 'watch') el.innerHTML = `<span class="pill wait"><span class="dot" style="display:inline-block;margin-right:.4em;background:${SEATS[d.turn] || 'var(--muted)'}"></span>${esc(cur?.name)} to play</span>${d.timer ? `<span class="myclock" data-clock="${d.turn}"></span>` : ''}`;
   else if (myIndex() < 0) el.innerHTML = `<span class="pill wait">Watching · ${esc(cur?.name)} to play</span>`;
   else el.innerHTML = `<span class="pill wait">Waiting for ${esc(cur?.name)}${isOnline(cur?.id) && !(S.role === 'guest' && hostAway) ? '' : ' (offline)'}</span>`;
 }
@@ -1234,6 +1353,7 @@ $('#endHome').addEventListener('click', () => { $('#endDlg').hidden = true; clos
 
 function codeTiles(code) { return [...code].map(L => `<span class="mini">${esc(L)}<i>${VALUES[L] || ''}</i></span>`).join(''); }
 function inviteLink() { return location.origin + location.pathname + '#' + S.code; }
+function watchLink() { return location.origin + location.pathname + '#watch=' + S.code; }
 function renderWait() {
   const d = g();
   $('#bigCode').innerHTML = codeTiles(S.code);
@@ -1251,10 +1371,11 @@ function renderWait() {
     : `<h2>Timer</h2><p style="margin:0">${esc(TIMERS[choice].label)}</p><p class="muted" style="margin:0;font-size:13px">${TIMER_HELP[choice]}</p>`;
   const seated = seats.some(s => s.id === S.me);
   let a = '';
-  if (d.hostId === S.me) a += `<button class="btn primary" type="button" id="startBtn" ${seats.length >= 2 ? '' : 'disabled'}>${seats.length >= 2 ? `Start game with ${seats.length}` : 'Waiting for players'}</button>`;
+  if (S.role === 'watch') a += `<span class="muted">You're watching. The board appears here when ${esc(d.hostName || 'the host')} starts the game.</span>`;
+  else if (d.hostId === S.me) a += `<button class="btn primary" type="button" id="startBtn" ${seats.length >= 2 ? '' : 'disabled'}>${seats.length >= 2 ? `Start game with ${seats.length}` : 'Waiting for players'}</button>`;
   else if (seated) a += `<span class="muted">Waiting for ${esc(d.hostName || 'the host')} to start the game.</span>`;
   else a += `<span class="muted">This table is full. You can watch.</span>`;
-  a += `<button class="btn" type="button" id="leaveBtn">${d.hostId === S.me ? 'Close table' : 'Leave'}</button>`;
+  a += `<button class="btn" type="button" id="leaveBtn">${S.role === 'watch' ? 'Stop watching' : d.hostId === S.me ? 'Close table' : 'Leave'}</button>`;
   $('#waitActions').innerHTML = a;
 }
 const TIMER_HELP = {
@@ -1273,6 +1394,12 @@ $('#waitActions').addEventListener('click', e => {
 $('#copyLink').addEventListener('click', async () => {
   const link = inviteLink();
   try { await navigator.clipboard.writeText(link); toast('Invite link copied'); }
+  catch { toast(link, 8000); }
+});
+document.addEventListener('click', async e => {
+  if (!e.target.closest('[data-copywatch]') || !S.code) return;
+  const link = watchLink();
+  try { await navigator.clipboard.writeText(link); toast('Watch link copied. Open it on a TV or laptop to show the board.', 4500); }
   catch { toast(link, 8000); }
 });
 
@@ -1312,9 +1439,15 @@ function resume() {
 
 function renderWho() {
   let h = '';
-  if (S.code && S.phase === 'table') {
+  if (S.code && S.role === 'watch') {
+    h += `<span class="chip">Watching table <code>${esc(S.code)}</code></span>`;
+    if (g()?.watching > 1) h += `<span class="chip">👀 ${Number(g().watching)} watching</span>`;
+    if (document.fullscreenEnabled) h += `<button class="btn small" type="button" id="fsBtn">${document.fullscreenElement ? 'Exit full screen' : 'Full screen'}</button>`;
+    h += `<button class="btn small" type="button" id="stopWatch">Stop watching</button>`;
+  } else if (S.code && S.phase === 'table') {
     const n = (g()?.online || []).length;
     h += `<span class="chip">Table <code>${esc(S.code)}</code></span>`;
+    if (g()?.watching > 0) h += `<span class="chip" title="People watching the board">👀 ${Number(g().watching)} watching</span>`;
     if (S.role === 'host') h += `<span class="chip">${n} connected</span>`;
     if (S.role === 'host' && g()?.status === 'playing' && !g().paused) h += `<button class="btn small${S.armed === 'pause' ? ' warn' : ''}" type="button" id="pauseBtn">${S.armed === 'pause' ? 'Tap again to pause' : 'Pause and save'}</button>`;
     else h += `<button class="btn small" type="button" id="toLobby">Leave table</button>`;
@@ -1322,6 +1455,24 @@ function renderWho() {
   $('#whoBar').innerHTML = h;
 }
 document.addEventListener('click', e => { if (e.target.id === 'pauseBtn') arm('pause', hostPause); });
+document.addEventListener('click', e => {
+  if (e.target.id === 'stopWatch') { if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {}); goHome(); }
+  else if (e.target.id === 'fsBtn') { (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()).catch(() => toast("This browser wouldn't go full screen.")); }
+});
+document.addEventListener('fullscreenchange', () => renderWho());
+// Keep a watching screen (such as a TV) from dimming or sleeping. Browsers drop the lock when the tab is hidden.
+let wake = null, wakeBusy = false;
+async function keepAwake() {
+  const want = S.role === 'watch' && !!S.code && document.visibilityState === 'visible';
+  try {
+    if (want && !wake && !wakeBusy && navigator.wakeLock) {
+      wakeBusy = true;
+      wake = await navigator.wakeLock.request('screen');
+      wake.addEventListener('release', () => { wake = null; });
+    } else if (!want && wake) { const w = wake; wake = null; await w.release(); }
+  } catch {} finally { wakeBusy = false; }
+}
+document.addEventListener('visibilitychange', keepAwake);
 document.addEventListener('click', e => {
   if (e.target.id !== 'toLobby') return;
   if (S.armed !== 'leave') toast('Tap Leave table again to leave.' + (S.role === 'host' ? ' Your friends lose their connection while you are away.' : ''), 3500);
@@ -1331,6 +1482,8 @@ $('#homeBtn').addEventListener('click', () => { if (!S.code) goHome(); });
 $('#connectCancel').addEventListener('click', goHome);
 
 function render() {
+  document.body.classList.toggle('tv', S.role === 'watch' && !!S.code);
+  keepAwake();
   renderWho();
   const d = g();
   const view = !S.code ? 'lobby' : S.phase === 'connect' || !d ? 'connect' : d.status === 'lobby' ? 'wait' : 'game';
@@ -1340,13 +1493,14 @@ function render() {
   $('#gameView').hidden = view !== 'game';
   if (view !== 'game') $('#endDlg').hidden = true;
   if (view === 'lobby') { renderGames(); return; }
-  if (view === 'connect') { $('#connectTitle').textContent = S.role === 'host' ? 'Opening your table' : 'Joining table ' + S.code; $('#connectMsg').textContent = S.connectMsg; return; }
+  if (view === 'connect') { $('#connectTitle').textContent = S.role === 'host' ? 'Opening your table' : (S.role === 'watch' ? 'Watching table ' : 'Joining table ') + S.code; $('#connectMsg').textContent = S.connectMsg; return; }
   if (view === 'wait') { renderWait(); return; }
   renderTurnLine(); renderBoard(); renderRack(); renderSide(); renderEnd(); updateClocks();
 }
 
 $('#createBtn').addEventListener('click', createTable);
 $('#joinBtn').addEventListener('click', () => joinTable($('#codeIn').value));
+$('#watchBtn').addEventListener('click', () => watchTable($('#codeIn').value));
 $('#codeIn').addEventListener('keydown', e => { if (e.key === 'Enter') joinTable($('#codeIn').value); });
 $('#nick').addEventListener('change', () => store.set('tt-nick', nick()));
 window.addEventListener('beforeunload', e => { if (S.role === 'host' && g()?.status === 'playing') { e.preventDefault(); e.returnValue = ''; } });
@@ -1389,7 +1543,14 @@ checkVersion(); setInterval(checkVersion, 60000);
 const nm = store.get('tt-nick'); if (nm) $('#nick').value = nm;
 if (typeof mqtt === 'undefined') toast('The connection library did not load. Reload the page.', 8000);
 const hash = (location.hash || '').slice(1).toUpperCase();
-if (/^[A-Z]{4}$/.test(hash)) {
+const watchHash = (hash.match(/^WATCH[=-]([A-Z]{4})$/) || [])[1];
+const watching = tabStore.get('tt-watching');
+if (watchHash) {
+  history.replaceState(null, '', location.pathname);
+  startWatch(watchHash, watching === watchHash);
+} else if (!hash && /^[A-Z]{4}$/.test(watching || '')) {
+  startWatch(watching, true);
+} else if (/^[A-Z]{4}$/.test(hash)) {
   history.replaceState(null, '', location.pathname);
   let sess = null; try { sess = JSON.parse(store.get('tt-session') || 'null'); } catch {}
   if (sess && sess.code === hash) resume();
